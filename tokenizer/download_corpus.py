@@ -11,29 +11,37 @@ Usage:
     python download_corpus.py --seed 1337           # different random sample
 """
 
-import argparse
-import random
-from pathlib import Path
+import argparse # cli argument parsing
+import random   # sampling
+from pathlib import Path # filesystem paths
+from datasets import load_dataset # streaming dataset access
+from tqdm import tqdm # progress bar
 
-from datasets import load_dataset
-from tqdm import tqdm
+"""
+config --- adjust as needed, defaults work for tokenizer training sample
 
-# ---------------------------------------------------------------------------
-# config
-# ---------------------------------------------------------------------------
+raw dir: where to save .txt chunks (created if missing)
+chunk size: how many documents per .txt chunk file (adjust based on doc length and RAM)
+min doc chars: filter out docs shorter than this (removes very short docs that add overhead without many tokens)
+dataset name/split/cfg: which HuggingFace dataset to stream (see https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu for options)
+text field: which field in the dataset contains the raw text to save
+"""
 
 RAW_DIR       = Path(__file__).parent / "data" / "raw"
-CHUNK_SIZE    = 10_000                    # documents per output .txt file
-MIN_DOC_CHARS = 200                       # discard docs shorter than this
+CHUNK_SIZE    = 10_000         # documents per output .txt file
+MIN_DOC_CHARS = 200            # discard docs shorter than this
 DATASET_NAME  = "HuggingFaceFW/fineweb-edu"
 DATASET_SPLIT = "train"
-DATASET_CFG   = "sample-10BT"            # 10B token sample; "default" = full 96B
+DATASET_CFG   = "sample-10BT" # 10B token sample; "default" = full 96B
 TEXT_FIELD    = "text"
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
+"""
+helpers
+
+chunk_exists: check if a chunk file already exists on disk (for resuming)
+write_chunk: save a list of documents to a chunk file on disk
+"""
 
 def chunk_exists(chunk_idx: int, out_dir: Path) -> bool:
     return (out_dir / f"chunk_{chunk_idx:05d}.txt").exists()
@@ -45,9 +53,13 @@ def write_chunk(docs: list[str], chunk_idx: int, out_dir: Path) -> None:
         f.write("\n\n".join(docs))
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
+"""
+main
+
+streams the dataset, applies sampling and length filtering, and writes out .txt chunk files.
+sampling is done via rng.random() per doc — no shuffle buffer needed, avoids iterator stalls.
+keeps track of how many docs seen, kept, and total chars for reporting at the end.
+"""
 
 def download(
     sample_frac: float = 1.0,
@@ -63,7 +75,7 @@ def download(
         chunk_idx += 1
     resume_from = chunk_idx
     if resume_from > 0:
-        print(f"resuming from chunk {resume_from} (chunks 0–{resume_from - 1} already exist)")
+        print(f"resuming from chunk {resume_from} (chunks 0-{resume_from - 1} already exist)")
 
     print(f"dataset      : {DATASET_NAME} ({DATASET_CFG})")
     print(f"sample_frac  : {sample_frac}")
@@ -74,26 +86,24 @@ def download(
 
     rng = random.Random(seed)
 
+    # no trust_remote_code — deprecated in recent datasets versions
     dataset = load_dataset(
         DATASET_NAME,
         name=DATASET_CFG,
         split=DATASET_SPLIT,
         streaming=True,
-        trust_remote_code=True,
     )
 
-    # shuffle within a buffer before sampling — avoids taking only the
-    # first N% of the dataset when sample_frac < 1.0
-    if sample_frac < 1.0:
-        dataset = dataset.shuffle(seed=seed, buffer_size=10_000)
+    # no shuffle buffer — rng.random() per doc gives uniform random sampling
+    # without risking iterator stalls from large buffers on newer datasets versions
 
     buffer: list[str] = []
-    docs_seen    = 0   # total docs from the stream (including skipped)
-    docs_kept    = 0   # docs that passed filter + sample
-    total_chars  = 0
+    docs_seen      = 0
+    docs_kept      = 0
+    total_chars    = 0
     chunks_written = 0
 
-    # skip chunks already on disk
+    # skip docs that already landed in chunks written in previous runs
     docs_to_skip = resume_from * CHUNK_SIZE
 
     pbar = tqdm(desc="docs kept", unit=" docs")
@@ -101,7 +111,7 @@ def download(
     for doc in dataset:
         docs_seen += 1
 
-        # --- sampling ---
+        # --- sampling: keep each doc independently at rate sample_frac ---
         if sample_frac < 1.0 and rng.random() >= sample_frac:
             continue
 
@@ -110,7 +120,7 @@ def download(
         if len(text) < min_chars:
             continue
 
-        # --- resume: skip docs that already landed in written chunks ---
+        # --- resume: skip docs already written in previous runs ---
         if docs_to_skip > 0:
             docs_to_skip -= 1
             continue
@@ -133,7 +143,7 @@ def download(
 
     pbar.close()
 
-    # flush any remaining docs
+    # flush any remaining docs that didn't fill a full chunk
     if buffer:
         write_chunk(buffer, chunk_idx, RAW_DIR)
         chunks_written += 1
@@ -147,15 +157,20 @@ def download(
     print(f"  approx tokens  : ~{total_chars // 4:,}  (rough 4 chars/token estimate)")
 
 
-# ---------------------------------------------------------------------------
-# cli
-# ---------------------------------------------------------------------------
+"""
+cli
+
+- sample_frac: keep only this fraction of docs (0.0-1.0). Use 0.02 for tokenizer training sample.
+- max_chunks: stop after writing this many NEW chunks (dev/debug)
+- seed: RNG seed for sampling reproducibility (default: 42)
+- min_chars: minimum document character length to filter out very short docs (default: 200)
+"""
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download FineWeb-edu corpus chunks.")
     parser.add_argument(
         "--sample_frac", type=float, default=1.0,
-        help="Fraction of corpus to keep (0.0–1.0). Use 0.02 for tokenizer training sample.",
+        help="Fraction of corpus to keep (0.0-1.0). Use 0.02 for tokenizer training sample.",
     )
     parser.add_argument(
         "--max_chunks", type=int, default=None,
@@ -163,7 +178,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--seed", type=int, default=42,
-        help="RNG seed for shuffling and sampling (default: 42).",
+        help="RNG seed for sampling (default: 42).",
     )
     parser.add_argument(
         "--min_chars", type=int, default=MIN_DOC_CHARS,

@@ -1,0 +1,2 @@
+tokenizer/data/raw/*.txt
+tokenizer/data/encoded/*.bin
