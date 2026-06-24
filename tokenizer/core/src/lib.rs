@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 
 pub mod vocab;
 pub mod pretokenize;
+pub mod bpe;
 
 #[pymodule]
 fn core(_m: &Bound<'_, PyModule>) -> PyResult<()> {
